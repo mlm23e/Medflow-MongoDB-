@@ -21,7 +21,7 @@ class OrderRead(BaseModel):
     priority : OrderPriority
     status : OrderStatus
     equipment_id : int
-    technician_id : int
+    technician_id : int | None
     created_at : datetime
     completed_at : datetime | None
     model_config = ConfigDict(from_attributes=True)
@@ -32,7 +32,7 @@ class OrderDiscrepancyRead(BaseModel):
     equipment_id : int
     equipment_facility_id : int
     technician_id : int
-    technician_facility_id : int
+    technician_facility_id : int | None
     model_config = ConfigDict(from_attributes=True)
 
 class EquipmentReliabilityRead(BaseModel):

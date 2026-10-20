@@ -8,13 +8,10 @@ from mangum import Mangum
 
 from fastapi import Request # day 10
 from fastapi.responses import JSONResponse # day 10
-from sqlalchemy.exc import IntegrityError # day 10
-
 from fastapi import FastAPI
 from fastapi import Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware # day 7 - update
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from pymongo.errors import DuplicateKeyError
 
 from app.routers import equipment, hospitals, reports, work_orders, users, auth
 
@@ -65,10 +62,10 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def database_is_available(db: AsyncSession) -> bool:
+async def database_is_available(db) -> bool:
     try:
         await asyncio.wait_for(
-            db.execute(text("SELECT 1")),
+            db.command("ping"),
             timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
         )
     except Exception:
@@ -101,7 +98,7 @@ async def s3_is_available() -> bool:
 
 @app.get("/health/ready", tags=["health"])
 async def readiness_check(
-    db: AsyncSession = Depends(get_db),
+    db=Depends(get_db),
 ) -> dict[str, str]:
     if not await database_is_available(db):
         raise HTTPException(
@@ -113,7 +110,7 @@ async def readiness_check(
 
 @app.get("/health/detail", tags=["health"])
 async def health_detail(
-    db: AsyncSession = Depends(get_db),
+    db=Depends(get_db),
     _: User = Depends(require_role(UserRole.ADMIN)),
 ) -> dict[str, dict[str, str]]:
     database_status = "ok" if await database_is_available(db) else "unavailable"
@@ -134,8 +131,8 @@ async def version() -> dict[str, str]:
 
 # this exception handles when our database constraint (our battery_level NOT being between 0 and 100) 
 # is violated. This is a common error that we want to handle gracefully
-@app.exception_handler(IntegrityError)
-async def integrity_error_handler(request: Request, exception: IntegrityError):
+@app.exception_handler(DuplicateKeyError)
+async def duplicate_key_error_handler(request: Request, exception: DuplicateKeyError):
     return JSONResponse(
         status_code=409, #CONFLICT
         content={"detail": "A database constraint was violated (e.g. a duplicate value)."}

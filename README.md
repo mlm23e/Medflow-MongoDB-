@@ -68,10 +68,10 @@ The application must secure endpoints and UI components using JWT-based authenti
 * **Field Technician:** Can view assigned equipment, trigger work order status changes, and attach service reports.
 * **Auditor (Read-Only):** Can view analytics dashboards, inspect data grids, and search system logs without write permissions.
 
-### B. RESTful API & Analytics Layer (FastAPI + PostgreSQL)
+### B. RESTful API & Analytics Layer (FastAPI + MongoDB)
 
 * Implement clean REST endpoints following standard HTTP verbs and status codes.
-* Design specific analytical endpoints executing SQL aggregation queries to answer the core business questions.
+* Design analytical endpoints that query MongoDB collections to answer the core business questions.
 * Validate all request payloads and response bodies using **Pydantic v2** models.
 
 ### C. Responsive User Interface (React + Material UI)
@@ -84,7 +84,7 @@ The application must secure endpoints and UI components using JWT-based authenti
 ### D. Cloud File & Document Management (AWS S3)
 
 * Support service report attachments (images or `.txt`/`.pdf` logs).
-* Upload files directly to an **AWS S3** bucket using Python's `boto3` SDK from the FastAPI backend and store secure media S3 URLs in PostgreSQL.
+* Upload files directly to an **AWS S3** bucket using Python's `boto3` SDK from the FastAPI backend and store secure media S3 URLs in MongoDB.
 
 ---
 
@@ -94,7 +94,7 @@ The application must secure endpoints and UI components using JWT-based authenti
 | --- | --- | --- |
 | **Frontend** | React (Vite) + Material UI (MUI) | **AWS S3** (Static Hosting) + **AWS CloudFront** (CDN) |
 | **Backend** | Python 3.10+ + FastAPI + Pydantic v2 | **AWS EC2** (application server) + **AWS Lambda** (serverless functions) |
-| **Database** | PostgreSQL + SQLAlchemy 2.0 | **AWS RDS** (Managed PostgreSQL) |
+| **Database** | MongoDB + PyMongo Async | **MongoDB Atlas** (Managed MongoDB) |
 | **Storage** | Python `boto3` SDK | **AWS S3** (Private Document Bucket) |
 
 ---
@@ -105,11 +105,11 @@ Participants must organize their project repository with standard automation scr
 
 ```text
 medflow/
-├── backend/            # FastAPI app, SQLAlchemy models, Pydantic schemas
+├── backend/            # FastAPI app, MongoDB persistence, Pydantic schemas
 ├── frontend/           # React + Vite + Material UI app
 ├── bin/
 │   ├── setup.sh        # Dependency installation & environment initialization
-│   └── seed.sh         # Script to seed PostgreSQL with mock hospitals, equipment & users
+│   └── seed.sh         # Script to seed MongoDB with mock hospitals, equipment & users
 └── README.md           # Setup and API documentation
 
 ```
@@ -117,7 +117,7 @@ medflow/
 ### Script Requirements
 
 * **`bin/setup.sh`**: Initializes the Python virtual environment (`venv`), installs `requirements.txt` and `npm` packages, and prepares local `.env` files.
-* **`bin/seed.sh`**: Seeds the target database (local or AWS RDS) with realistic initial mock data for testing.
+* **`bin/seed.sh`**: Seeds the target database (local MongoDB or MongoDB Atlas) with realistic initial mock data for testing.
 
 -------------------------------------------------------------------------------------------------
 ## 7. Deliverables & Day 13 Showcase Expectations
@@ -126,10 +126,10 @@ By the conclusion of the workshop, participants must present a working deploymen
 
 ### Showcase Evaluation Criteria
 
-1. **Live Cloud URL:** Walking through the application hosted live on AWS CloudFront connected to the backend on AWS EC2/Lambda and AWS RDS.
+1. **Live Cloud URL:** Walking through the application hosted live on AWS CloudFront connected to the backend on AWS EC2/Lambda and MongoDB Atlas.
 2. **RBAC Walkthrough:** Demonstrating role restrictions (e.g., logging in as a *Clinical Admin* to modify equipment assets vs. a *Field Technician* uploading an S3 service report).
 3. **Data Grid & Analytical Dashboard:** Demonstrating live filtering, searching, and accurate metrics addressing the business questions.
-4. **Codebase Architecture Tour:** A brief walk-through of Pydantic validation schemas, FastAPI dependencies (`Depends`), SQLAlchemy database sessions, and MUI state management.
+4. **Codebase Architecture Tour:** A brief walk-through of Pydantic validation schemas, FastAPI dependencies (`Depends`), MongoDB collections, and MUI state management.
 
 ## 8. Local Setup and Seed Data
 
@@ -139,7 +139,7 @@ Run setup from any directory with Bash, Python 3 (including `venv`), and npm ins
 bin/setup.sh
 ```
 
-Setup creates `backend/.venv` only when it is missing, installs backend and frontend dependencies, and copies `backend/.env.example` only when `backend/.env` does not already exist. Configure `DATABASE_URL` and `SECRET_KEY` in `backend/.env` before starting the backend.
+Setup creates `backend/.venv` only when it is missing, installs backend and frontend dependencies, and copies `backend/.env.example` only when `backend/.env` does not already exist. Configure `MONGODB_URL`, `MONGODB_DATABASE`, and `SECRET_KEY` in `backend/.env` before starting the backend. The default MongoDB URL is `mongodb://localhost:27017`.
 
 Seed the database with:
 
@@ -147,6 +147,6 @@ Seed the database with:
 bin/seed.sh
 ```
 
-The seed script uses `DATABASE_URL` from the environment, or from `backend/.env` when it is unset. It must be a PostgreSQL SQLAlchemy URL such as `postgresql+asyncpg://...`; PostgreSQL must be running and `psql` must be installed. Re-running the command does not duplicate the demo users, sites, assets, jobs, or reports.
+The seed script uses `MONGODB_URL` and `MONGODB_DATABASE` from the environment or from `backend/.env`. MongoDB must be running and reachable. Re-running the command updates the demo users, sites, assets, jobs, and reports without duplicating them.
 
 To clear and reload the demo sites and their dependent equipment, work orders, and reports, use `bin/seed.sh --reset`. The script asks for confirmation; `bin/seed.sh --reset --yes` skips the prompt. Seed users are preserved. Both scripts resolve project paths relative to their own location.

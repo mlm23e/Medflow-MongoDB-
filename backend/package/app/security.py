@@ -1,6 +1,6 @@
 """
 Medflow Command Center
-SECRET_KEY: it follows the same environment-variable-with-fallback pattern that we saw on Day 3's DATABASE_URL
+SECRET_KEY: it is loaded from the environment, like MONGODB_URL
 
 We will not be committing a real secret key here if this were a real project being pushed to production 
 (this would not be a secure place to put it).

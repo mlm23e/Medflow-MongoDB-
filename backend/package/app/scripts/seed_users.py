@@ -1,24 +1,47 @@
 import asyncio
-from app.database import AsyncSessionLocal
-from app.models import User, UserRole
+
+from app.database import client, database, initialize_database, next_id
+from app.models import UserRole
 from app.security import hash_password
 
-async def seed_users()->None:
-    async with AsyncSessionLocal() as session:
-        session.add_all([
-            User(username="admin", hashed_password=hash_password("adminpass123!"), first_name="John", last_name="Smith", role=UserRole.ADMIN),
-            User(username="technician", hashed_password=hash_password("technicianpass123!"), first_name="Angie", last_name="Paltrow", role=UserRole.TECHNICIAN),
-            User(username="auditor", hashed_password=hash_password("auditorpass123!"), first_name="Winston", last_name="Church", role=UserRole.AUDITOR),
-            User(username="admin_carrie", hashed_password=hash_password("adminpass123!"), first_name="Carrie", last_name="Brown", role=UserRole.ADMIN),
-            User(username="technician_carrie", hashed_password=hash_password("technicianpass123!"), first_name="Carrie", last_name="McGill", role=UserRole.TECHNICIAN),
-            User(username="auditor_mike", hashed_password=hash_password("auditorpass123!"), first_name="Mike", last_name="Church", role=UserRole.AUDITOR),
-            User(username="admin_john", hashed_password=hash_password("adminpass123!"), first_name="John", last_name="Mikakis", role=UserRole.ADMIN),
-            User(username="technician_james", hashed_password=hash_password("technicianpass123!"), first_name="James", last_name="McGill", role=UserRole.TECHNICIAN),
-            User(username="auditor_jamie", hashed_password=hash_password("auditorpass123!"), first_name="Jamie", last_name="Weerasethankul", role=UserRole.AUDITOR),
-            User(username="admin_parmy", hashed_password=hash_password("adminpass123!"), first_name="Parmjeet", last_name="Larson", role=UserRole.ADMIN),
-            User(username="technician_paul", hashed_password=hash_password("technicianpass123!"), first_name="Paul", last_name="McHogeoan", role=UserRole.TECHNICIAN),
-            User(username="auditor_paul", hashed_password=hash_password("auditorpass123!"), first_name="Paul", last_name="Atreides", role=UserRole.AUDITOR),
-        ])
-        await session.commit()
+SEED_USERS = [
+    ("admin", "John", "Smith", UserRole.ADMIN, "adminpass123!"),
+    ("technician", "Angie", "Paltrow", UserRole.TECHNICIAN, "technicianpass123!"),
+    ("auditor", "Winston", "Church", UserRole.AUDITOR, "auditorpass123!"),
+    ("admin_carrie", "Carrie", "Brown", UserRole.ADMIN, "adminpass123!"),
+    ("technician_carrie", "Carrie", "McGill", UserRole.TECHNICIAN, "technicianpass123!"),
+    ("auditor_mike", "Mike", "Church", UserRole.AUDITOR, "auditorpass123!"),
+    ("admin_john", "John", "Mikakis", UserRole.ADMIN, "adminpass123!"),
+    ("technician_james", "James", "McGill", UserRole.TECHNICIAN, "technicianpass123!"),
+    ("auditor_jamie", "Jamie", "Weerasethankul", UserRole.AUDITOR, "auditorpass123!"),
+    ("admin_parmy", "Parmjeet", "Larson", UserRole.ADMIN, "adminpass123!"),
+    ("technician_paul", "Paul", "McHogeoan", UserRole.TECHNICIAN, "technicianpass123!"),
+    ("auditor_paul", "Paul", "Atreides", UserRole.AUDITOR, "auditorpass123!"),
+]
+
+
+async def seed_users() -> None:
+    await initialize_database()
+    for username, first_name, last_name, role, password in SEED_USERS:
+        if await database.users.find_one({"username": username}) is not None:
+            continue
+        await database.users.insert_one({
+            "id": await next_id(database, "users"),
+            "username": username,
+            "hashed_password": hash_password(password),
+            "first_name": first_name,
+            "last_name": last_name,
+            "role": role.value,
+            "facility_id": None,
+        })
+
+
+async def run() -> None:
+    try:
+        await seed_users()
+    finally:
+        await client.close()
+
+
 if __name__ == "__main__":
-    asyncio.run(seed_users())
+    asyncio.run(run())

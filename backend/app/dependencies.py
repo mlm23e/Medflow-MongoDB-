@@ -1,14 +1,9 @@
-from collections.abc import AsyncGenerator
-
 import jwt
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
-from sqlalchemy import select 
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.database import AsyncSessionLocal
+from app.database import database, initialize_database, without_mongo_id
 from app.models import User, UserRole
 
 from app.security import decode_access_token
@@ -17,14 +12,14 @@ from app.security import decode_access_token
 # provided in the authorization header of the request
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        yield session
+async def get_db():
+    await initialize_database()
+    yield database
 
 
 async def get_current_user(
         token : str = Depends(oauth2_scheme),
-        db : AsyncSession = Depends(get_db)
+        db = Depends(get_db)
 ) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -39,11 +34,10 @@ async def get_current_user(
     except jwt.InvalidTokenError:
         raise credentials_exception
 
-    result = await db.execute(select(User).where(User.username == username))
-    user = result.scalar_one_or_none()
+    user = await db.users.find_one({"username": username})
     if user is None:
         raise credentials_exception
-    return user
+    return User.model_validate(without_mongo_id(user))
 
 def require_role(*allowed_role : UserRole):
     async def role_checker(current_user : User = Depends(get_current_user))-> User:

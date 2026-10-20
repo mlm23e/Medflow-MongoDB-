@@ -1,6 +1,7 @@
 {
     "Variables": {
-        "DATABASE_URL" : "postgresql+asyncpg://postgres:password@medflow.cv2s0q8a4j6b.us-east-2.rds.amazonaws.com:5432/medflow",
+        "MONGODB_URL" : "mongodb+srv://<username>:<password>@<cluster-host>/",
+        "MONGODB_DATABASE" : "medflow",
         "SECRET_KEY" : "1caa692345deb4088aae79c74d4c8c2cf0b11255e2fb46cc3ca08aced1c8fe45",
         "FRONTEND_ORIGIN" : "https://ld12s0csjxq85o6.cloudfront.net"
     }

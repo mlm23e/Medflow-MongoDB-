@@ -1,6 +1,6 @@
 from decimal import Decimal
 from pydantic import BaseModel, Field, ConfigDict
-from app.models import EquipStatus, Equipment
+from app.models import EquipStatus
 
 class EquipmentBase(BaseModel):
     serial_number : str = Field(min_length=1, max_length=100)

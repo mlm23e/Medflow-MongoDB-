@@ -1,0 +1,212 @@
+\documentclass[10pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[margin=0.62in]{geometry}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\definecolor{codebg}{HTML}{F3F5F4}
+\definecolor{codeframe}{HTML}{D6DEDA}
+\definecolor{ink}{HTML}{20312B}
+\hypersetup{colorlinks=true, linkcolor=ink, urlcolor=ink}
+\setlist{nosep,leftmargin=*}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\setlength{\emergencystretch}{2em}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  framerule=0.4pt,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  aboveskip=4pt,
+  belowskip=5pt,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  tabsize=2
+}
+
+\title{Full-Stack Workshop Cheat Sheet\\[-2pt]\large PostgreSQL $\rightarrow$ FastAPI $\rightarrow$ React/Vite}
+\author{Build order, commands, and reviewer-ready explanations}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1.2em}
+
+\textbf{Mental model.} PostgreSQL stores durable relational data. SQLAlchemy maps database rows to Python objects. Pydantic validates data crossing the API boundary. FastAPI connects those layers through HTTP endpoints. React presents the workflow in a browser and calls the API.
+
+\section{1. Start With the Database}
+Sketch entities and relationships before writing routes. In Medflow, a hospital has many equipment records; equipment has work orders; work orders can have reports; users can be assigned as technicians. A foreign key captures a relationship, while constraints protect data even when a request bypasses application validation.
+
+\textbf{Create a local database} (PostgreSQL must be installed and running; these commands use the local PostgreSQL role):
+\begin{lstlisting}
+createdb medflow
+psql -d medflow
+\end{lstlisting}
+Alternatively, from the \texttt{psql} prompt connected to a maintenance database, run \texttt{CREATE DATABASE medflow;}, then exit with \texttt{\textbackslash q}. Use a dedicated database role and a locally configured password for real deployments; never put credentials in source control.
+
+\textbf{Define and apply schema.} Write tables, primary keys, foreign keys, \texttt{NOT NULL}, \texttt{UNIQUE}, \texttt{CHECK}, and defaults in a versioned SQL file. Use enums for finite states only when the allowed values are genuinely controlled.
+\begin{lstlisting}
+psql -d medflow -v ON_ERROR_STOP=1 -f db/sql/DDL.sql
+psql -d medflow -c '\\dt'
+\end{lstlisting}
+In this repository, \href{db/sql/DDL.sql}{DDL.sql} is the hand-authored PostgreSQL definition, including enums and constraints such as charge level between 0 and 100. It is useful documentation and can be applied directly to a fresh database. The repo's normal seed path is different: \texttt{bin/seed.sh} creates missing tables from SQLAlchemy metadata, then runs \texttt{db/sql/DML.sql}. Do not apply both table-creation paths to the same fresh database without checking for conflicts.
+
+\textbf{Reviewer: Why enforce rules in the database too?} API validation gives a helpful client error; database constraints are the final integrity boundary across every writer, including scripts and future services.
+
+\section{2. Map Tables With SQLAlchemy ORM}
+An ORM (object-relational mapper) describes how Python classes and fields correspond to SQL tables and columns. Use one declarative \texttt{Base}, mapped columns, foreign keys, and relationships. Keep relationship ownership and delete behavior deliberate.
+\begin{lstlisting}
+from sqlalchemy import ForeignKey, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+class Equipment(Base):
+    __tablename__ = "equipment"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    serial_number: Mapped[str] = mapped_column(String(100), unique=True)
+    facility_id: Mapped[int] = mapped_column(ForeignKey("hospitals.id"))
+    work_orders: Mapped[list["WorkOrder"]] = relationship(back_populates="equipment")
+\end{lstlisting}
+In SQLAlchemy 2, \texttt{Mapped[T]} declares the Python type and \texttt{mapped\_column} configures the column. A \texttt{ForeignKey} is the database link; \texttt{relationship} gives convenient object navigation and is not itself a column. Import all model classes before using \texttt{Base.metadata} so their tables are registered.
+
+\textbf{Create tables in a small local prototype} (not a production migration strategy):
+\begin{lstlisting}
+async with engine.begin() as connection:
+    await connection.run_sync(Base.metadata.create_all)
+\end{lstlisting}
+
+\textbf{Reviewer: Why use an ORM?} It lets application code query and update typed domain objects while SQLAlchemy generates SQL and manages relationships. Raw SQL remains useful for database-specific DDL, reporting, and carefully tuned queries.
+
+\section{3. Define API Schemas With Pydantic}
+Pydantic schemas define and validate the JSON contract, independently of the persistence model. Usually create separate input and output shapes: clients must not choose server-generated fields such as IDs or timestamps. Validate at the boundary, then pass only expected fields into the ORM.
+\begin{lstlisting}
+from pydantic import BaseModel, ConfigDict, Field
+
+class WorkOrderCreate(BaseModel):
+    title: str = Field(min_length=5)
+    equipment_id: int = Field(ge=1)
+
+class WorkOrderRead(BaseModel):
+    id: int
+    title: str
+    equipment_id: int
+    model_config = ConfigDict(from_attributes=True)
+\end{lstlisting}
+\texttt{from\_attributes=True} lets Pydantic build a response from ORM object attributes. Define separate update schemas with optional fields for PATCH requests; \texttt{model\_dump(exclude\_unset=True)} distinguishes omitted values from explicitly supplied values.
+
+\textbf{Reviewer: Why not return ORM objects directly?} Schemas give a stable, explicit public contract, validate input and output, and prevent internal or sensitive fields from leaking into responses.
+
+\section{4. Connect FastAPI to the Database}
+Use an async PostgreSQL driver with SQLAlchemy's async engine. A session represents a unit of database work; yield one session per request and let the dependency close it, including on errors.
+\begin{lstlisting}
+from collections.abc import AsyncGenerator
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+engine = create_async_engine(DATABASE_URL)
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+async def get_db() -> AsyncGenerator:
+    async with SessionLocal() as session:
+        yield session
+\end{lstlisting}
+Use a URL such as \texttt{postgresql+asyncpg://USER:PASSWORD@HOST:5432/medflow}. Put the real value in an ignored local environment file; use a placeholder in examples and configure production secrets outside the codebase. In Medflow, configuration is loaded by \texttt{app/config.py} and requests obtain the session through \texttt{Depends(get\_db)}.
+
+\textbf{Reviewer: Why dependency injection?} A route declares what it needs, while FastAPI creates and cleans up the session. This centralizes resource lifecycle and makes dependencies replaceable in tests.
+
+\section{5. Add FastAPI Routes}
+Group endpoints by resource with \texttt{APIRouter}. Use HTTP verbs consistently: GET reads, POST creates, PUT replaces, PATCH updates selected fields, and DELETE removes. Return meaningful status codes: 200, 201, 204, 404, 409, 422, 401, and 403 as appropriate.
+\begin{lstlisting}
+router = APIRouter(prefix="/work-orders", tags=["work-orders"])
+
+@router.post("", response_model=WorkOrderRead, status_code=201)
+async def create_work_order(
+    payload: WorkOrderCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    order = WorkOrder(**payload.model_dump())
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    return order
+\end{lstlisting}
+Before creating a record, check that referenced rows exist and return 404 when they do not. Handle expected constraint conflicts cleanly. Register each router in the app module. FastAPI generates interactive OpenAPI documentation at \texttt{/docs}.
+
+\textbf{Analytics.} Build aggregate queries with SQLAlchemy expressions such as \texttt{select}, \texttt{func.count}, \texttt{case}, joins, and \texttt{group\_by}. Return a dedicated Pydantic schema for each result. State metric definitions explicitly: for example, whether unresolved work orders count in a denominator.
+
+\textbf{Reviewer: What does \texttt{Depends} do?} It declares a dependency that FastAPI resolves for the request. The same mechanism can provide a database session, current user, or authorization check without manually threading those concerns through every caller.
+
+\section{6. Add Authentication and Authorization}
+Hash passwords with a password-hashing algorithm such as bcrypt; never store plaintext. On login, verify the hash and issue a short-lived signed JWT. A bearer-token dependency validates the token and resolves its subject to a current user. A role dependency then checks whether that user's role may perform the requested action.
+
+Authentication answers ``who are you?'' Authorization answers ``may you do this?'' Enforce authorization on the API, not only by hiding buttons in React. Return 401 for missing or invalid credentials and 403 for an authenticated user without permission. Use HTTPS and managed secrets outside local development.
+
+\textbf{Reviewer: What does JWT contain?} A signed token carries claims (for example, a subject and expiration). Its signature detects tampering; it is not encryption, so do not put secrets in its payload.
+
+\section{7. Scaffold the React/Vite Frontend}
+For a new project, scaffold the frontend from the repository root. Choose React when prompted, or use the React template directly:
+\begin{lstlisting}
+npm create vite@latest frontend -- --template react
+cd frontend
+npm install
+npm run dev
+\end{lstlisting}
+Vite serves the development UI (normally at \texttt{http://localhost:5173}). Add a component library only if the project needs one; Medflow uses Material UI and its DataGrid. Keep API calls in a shared client module and authentication state in a shared provider/context rather than duplicating request setup in each page.
+\begin{lstlisting}
+// Example shared Axios client
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000",
+});
+\end{lstlisting}
+Configure the API origin in the frontend environment (for Vite, client-visible variables use the \texttt{VITE\_} prefix). The backend must allow the frontend origin through CORS. CORS controls which browser origins may read responses; it is not authentication or API access control.
+
+\textbf{Reviewer: Why a shared API client?} It centralizes the base URL and common behavior such as adding a bearer token, so components focus on UI state and data presentation.
+
+\section{8. Run, Seed, and Check Locally}
+For a fresh project, create a virtual environment, install the API/database packages, configure environment variables, then run the API and frontend in separate terminals:
+\begin{lstlisting}
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install "fastapi[standard]" sqlalchemy asyncpg pydantic-settings python-dotenv pyjwt bcrypt python-multipart
+uvicorn app.main:app --reload
+\end{lstlisting}
+\begin{lstlisting}
+cd frontend
+npm run dev
+\end{lstlisting}
+Use \texttt{python -m pytest} for backend tests and \texttt{npm run build} for a production frontend build. Test invalid input, missing records, unauthenticated access, forbidden roles, and a successful end-to-end request. A passing build does not prove runtime database connectivity; test the health endpoint and a real API flow too.
+
+\textbf{For this repository instead of a fresh scaffold:}
+\begin{lstlisting}
+bin/setup.sh
+# Set DATABASE_URL and SECRET_KEY in backend/.env
+bin/seed.sh
+cd backend && source .venv/bin/activate
+uvicorn app.main:app --reload
+# In a second terminal:
+cd frontend && npm run dev
+\end{lstlisting}
+The seed helper requires PostgreSQL and \texttt{psql}; it creates missing tables from ORM metadata and then loads demo data. Do not confuse seed/reset operations with schema migrations. For evolving a shared or deployed database, use a migration tool such as Alembic, review generated migrations, and apply them deliberately.
+
+\section{Reviewer Quick Answers}
+\begin{description}[leftmargin=1.2em,style=nextline]
+  \item[Database vs. ORM] PostgreSQL owns persisted tables and constraints; the ORM maps those tables to application objects and generates database operations.
+  \item[ORM vs. schema] ORM models describe persistence. Pydantic schemas describe validated API input and output. They can resemble one another but serve different boundaries.
+  \item[Why async?] Async database calls can free the server event loop while waiting on I/O. Use an async driver and await the database operations consistently.
+  \item[Why both API and DB validation?] API validation gives useful client feedback; database constraints preserve integrity across all writers.
+  \item[Why migrations?] Metadata table creation can create missing tables, but it does not safely describe and apply every change to existing data or schema. Migrations record ordered, reviewable upgrades.
+  \item[Why CORS?] Browsers enforce origin boundaries. The API must explicitly allow the development or deployed frontend origin; CORS does not replace authentication.
+\end{description}
+
+\end{document}

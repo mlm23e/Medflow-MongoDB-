@@ -1,249 +1,156 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, HTTPException, status, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
-from sqlalchemy import case, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.database import next_id, to_mongo, without_mongo_id
+from app.dependencies import get_current_user, get_db, require_role
+from app.models import Equipment, OrderPriority, OrderStatus, User, UserRole
 from app.schema.work_orders import (
     EquipmentReliabilityRead,
-    OrderDiscrepancyRead,
     OrderCreate,
-    OrderPriority,
+    OrderDiscrepancyRead,
     OrderRead,
-    OrderUpdate,
     OrderStatusUpdate,
+    OrderUpdate,
 )
-from app.schema.equipment import EquipmentRead
-from app.models import Equipment, UserRole, User, WorkOrder, OrderPriority, OrderStatus
-
-from app.dependencies import get_db, require_role, get_current_user
 
 router = APIRouter(prefix="/work_orders", tags=["work_orders"])
 
 
-"""
-Creates a WorkOrder object
-"""
 @router.post("", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
 async def post_work_order(
     payload: OrderCreate,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN))
-)->WorkOrder:
-    equip = await db.get(Equipment, payload.equipment_id)
-    if equip is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail = (f"WorkOrder '{payload.equipment_id}' not found")
-        )
+    db=Depends(get_db),
+    _: User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN)),
+):
+    if await db.equipment.find_one({"id": payload.equipment_id}) is None:
+        raise HTTPException(status_code=404, detail=f"Equipment '{payload.equipment_id}' not found")
+    if payload.technician_id is not None and await db.users.find_one({"id": payload.technician_id}) is None:
+        raise HTTPException(status_code=404, detail=f"User '{payload.technician_id}' not found")
+    order = to_mongo(payload.model_dump())
+    order.update(id=await next_id(db, "work_orders"), created_at=datetime.now(), completed_at=None)
+    await db.work_orders.insert_one(order)
+    return order
 
-    if payload.technician_id is not None:
-        user = await db.get(User, payload.technician_id)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=(f"User '{payload.technician_id}' not found")
-            )
 
-    work_order = WorkOrder(**payload.model_dump())
-    db.add(work_order)
-    await db.commit()
-    await db.refresh(work_order)
-    return work_order
-
-"""
-Reads ALL WorkOrders
-"""
 @router.get("", response_model=list[OrderRead])
-async def list_work_orders(
-    db : AsyncSession = Depends(get_db),
-    _ : User = Depends(get_current_user)
-)->list[WorkOrder]:
-    statement = select(WorkOrder).order_by(WorkOrder.id)
-    result = await db.execute(statement)
-    return list(result.scalars().all())
+async def list_work_orders(db=Depends(get_db), _: User = Depends(get_current_user)):
+    return [without_mongo_id(item) async for item in db.work_orders.find().sort("id", 1)]
 
-"""
-Determines the work_order call completion/failure broken down by Equipment model
-(answers business question #3)
-"""
+
 @router.get("/reliability", response_model=list[EquipmentReliabilityRead])
-async def atm_reliability_metric(
-    db : AsyncSession = Depends(get_db),
-    _ : User = Depends(get_current_user)
-) -> list[EquipmentReliabilityRead]:
-    statement = (
-        select(
-            Equipment.model.label("model"),
-            func.count(WorkOrder.id).label("total_calls"),
-            func.sum(
-                case((WorkOrder.status == OrderStatus.COMPLETED, 1), else_=0)
-            ).label("completed_calls"),
-            func.sum(
-                case((WorkOrder.status == OrderStatus.FAILED, 1), else_=0)
-            ).label("failed_calls"),
-        )
-        .join(WorkOrder, WorkOrder.equipment_id == Equipment.id)
-        .group_by(Equipment.model)
-        .order_by(Equipment.model)
-    )
+async def atm_reliability_metric(db=Depends(get_db), _: User = Depends(get_current_user)):
+    equipment = await db.equipment.find().to_list(None)
+    equipment_models = {item["id"]: item["model"] for item in equipment}
+    grouped = {}
+    for order in await db.work_orders.find().to_list(None):
+        model = equipment_models.get(order["equipment_id"])
+        if model is None:
+            continue
+        metrics = grouped.setdefault(model, {"total_calls": 0, "completed_calls": 0, "failed_calls": 0})
+        metrics["total_calls"] += 1
+        metrics["completed_calls"] += order["status"] == OrderStatus.COMPLETED.value
+        metrics["failed_calls"] += order["status"] == OrderStatus.FAILED.value
+    results = []
+    for model, metrics in sorted(grouped.items()):
+        resolved = metrics["completed_calls"] + metrics["failed_calls"]
+        results.append(EquipmentReliabilityRead(
+            model=model,
+            **metrics,
+            completion_rate=metrics["completed_calls"] / resolved * 100 if resolved else 0,
+            failure_rate=metrics["failed_calls"] / resolved * 100 if resolved else 0,
+        ))
+    return results
 
-    result = await db.execute(statement)
-    metrics = []
 
-    for row in result.mappings().all():
-        completed_calls = int(row["completed_calls"] or 0)
-        failed_calls = int(row["failed_calls"] or 0)
-        resolved_calls = completed_calls + failed_calls
-        completion_rate = (
-            completed_calls / resolved_calls * 100 if resolved_calls else 0
-        )
-        failure_rate = (
-            failed_calls / resolved_calls * 100 if resolved_calls else 0
-        )
-
-        metrics.append(
-            EquipmentReliabilityRead(
-                model=row["model"],
-                total_calls=int(row["total_calls"]),
-                completed_calls=completed_calls,
-                failed_calls=failed_calls,
-                completion_rate=completion_rate,
-                failure_rate=failure_rate,
-            )
-        )
-
-    return metrics
-
-"""
-Finds co-location discrepancies between the WorkOrder and User facility IDs, 
-with the option to return only the discrepancies found for work_order 
-calls of a certain priority
-(answers business question #2)
-"""
 @router.get("/discrepancies", response_model=list[OrderDiscrepancyRead])
 async def list_colocation_discrepancies(
-    priority: OrderPriority | None = Query(
-        default=None,
-        description="Only return discrepancies for work orders of this priority"
-    ),
-    db : AsyncSession = Depends(get_db),
-    _ : User = Depends(get_current_user)
+    priority: OrderPriority | None = Query(default=None),
+    db=Depends(get_db),
+    _: User = Depends(get_current_user),
 ):
-    # Answers business question #2 (find colocation discrepancies between WorkOrder and Technician facility_id)
-    statement = (
-        select(
-            WorkOrder.id.label("work_order_id"), 
-            WorkOrder.title, 
-            Equipment.id.label("equipment_id"),
-            Equipment.facility_id.label("equipment_facility_id"), 
-            User.facility_id.label("technician_facility_id"),
-            User.id.label("technician_id")
-        )
-        .join(Equipment, Equipment.id == WorkOrder.equipment_id)
-        .join(User, User.id == WorkOrder.technician_id)
-        .where(Equipment.facility_id != User.facility_id)
-    )
+    equipment = {item["id"]: item for item in await db.equipment.find().to_list(None)}
+    users = {item["id"]: item for item in await db.users.find().to_list(None)}
+    results = []
+    query = {"priority": priority.value} if priority is not None else {}
+    for order in await db.work_orders.find(query).sort("id", 1).to_list(None):
+        item = equipment.get(order["equipment_id"])
+        technician = users.get(order.get("technician_id"))
+        if (
+            item is None
+            or technician is None
+            or technician.get("facility_id") is None
+            or item["facility_id"] == technician["facility_id"]
+        ):
+            continue
+        results.append(OrderDiscrepancyRead(
+            work_order_id=order["id"],
+            title=order["title"],
+            equipment_id=item["id"],
+            equipment_facility_id=item["facility_id"],
+            technician_id=technician["id"],
+            technician_facility_id=technician["facility_id"],
+        ))
+    return results
 
-    if priority is not None:
-        statement = statement.where(WorkOrder.priority == priority)
 
-    statement = statement.order_by(WorkOrder.id)
-
-    result = await db.execute(statement)
-    return [dict(row) for row in result.mappings().all()]
-
-"""
-Reads WorkOrder by its ID
-"""
 @router.get("/{work_order_id}", response_model=OrderRead)
 async def get_work_order_by_id(
-    work_order_id : int,
-    db : AsyncSession = Depends(get_db),
-    _ : User = Depends(get_current_user)
-) -> WorkOrder:
-    work_order = await db.get(WorkOrder, work_order_id)
-    if work_order is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(f"WorkOrder '{work_order_id}' not found")
-        )
-    return work_order
+    work_order_id: int,
+    db=Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    order = without_mongo_id(await db.work_orders.find_one({"id": work_order_id}))
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"WorkOrder '{work_order_id}' not found")
+    return order
 
 
-
-"""
-Updates a WorkOrder
-"""
 @router.patch("/{work_order_id}", response_model=OrderRead)
 async def update_work_order(
-    work_order_id : int,
-    payload : OrderUpdate, 
-    db : AsyncSession = Depends(get_db),
-    _ : User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN))
-) -> WorkOrder:
-    work_order = await db.get(WorkOrder, work_order_id)
-
-    if work_order is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(f"WorkOrder '{work_order_id}' not found")
-        )
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(work_order, field, value)
-
-    await db.commit()
-    await db.refresh(work_order)
-    return work_order
+    work_order_id: int,
+    payload: OrderUpdate,
+    db=Depends(get_db),
+    _: User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN)),
+):
+    updates = to_mongo(payload.model_dump(exclude_unset=True))
+    if await db.work_orders.find_one({"id": work_order_id}) is None:
+        raise HTTPException(status_code=404, detail=f"WorkOrder '{work_order_id}' not found")
+    if "equipment_id" in updates and await db.equipment.find_one({"id": updates["equipment_id"]}) is None:
+        raise HTTPException(status_code=404, detail=f"Equipment '{updates['equipment_id']}' not found")
+    if "technician_id" in updates and updates["technician_id"] is not None:
+        if await db.users.find_one({"id": updates["technician_id"]}) is None:
+            raise HTTPException(status_code=404, detail=f"User '{updates['technician_id']}' not found")
+    await db.work_orders.update_one({"id": work_order_id}, {"$set": updates})
+    return without_mongo_id(await db.work_orders.find_one({"id": work_order_id}))
 
 
-"""
-Updates the WorkOrder status
-"""
-@router.patch("/{work_order_id}/status", response_model= OrderRead)
+@router.patch("/{work_order_id}/status", response_model=OrderRead)
 async def update_work_order_status(
-    work_order_id : int,
-    payload : OrderStatusUpdate,
-    db : AsyncSession = Depends(get_db),
-    _ : User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN))
-) -> WorkOrder:
-    
-    work_order = await db.get(WorkOrder, work_order_id)
+    work_order_id: int,
+    payload: OrderStatusUpdate,
+    db=Depends(get_db),
+    _: User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN)),
+):
+    order = await db.work_orders.find_one({"id": work_order_id})
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"Work Order '{work_order_id}' not found")
+    completed_at = datetime.now() if payload.status == OrderStatus.COMPLETED else None
+    await db.work_orders.update_one(
+        {"id": work_order_id},
+        {"$set": {"status": payload.status.value, "completed_at": completed_at}},
+    )
+    return without_mongo_id(await db.work_orders.find_one({"id": work_order_id}))
 
-    if work_order is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(f"Work Order '{work_order_id}' not found")
-        )
 
-    if payload.status == OrderStatus.COMPLETED:
-        work_order.completed_at = datetime.now()
-    elif work_order.status == OrderStatus.COMPLETED:
-        work_order.completed_at = None
-
-    work_order.status = payload.status
-
-    await db.commit()
-    await db.refresh(work_order)
-
-    return work_order
-
-"""
-Deletes a WorkOrder
-"""
 @router.delete("/{work_order_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_work_order(
-    work_order_id : int,
-    db : AsyncSession = Depends(get_db),
-    _ : User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN))
-)-> Response:
-    work_order = await db.get(WorkOrder, work_order_id)
-    if work_order is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(f"Work Order '{work_order_id}' not found")
-        )
-    await db.delete(work_order)
-    await db.commit()
+    work_order_id: int,
+    db=Depends(get_db),
+    _: User = Depends(require_role(UserRole.ADMIN, UserRole.TECHNICIAN)),
+) -> Response:
+    if await db.work_orders.find_one({"id": work_order_id}) is None:
+        raise HTTPException(status_code=404, detail=f"Work Order '{work_order_id}' not found")
+    await db.reports.delete_many({"work_order_id": work_order_id})
+    await db.work_orders.delete_one({"id": work_order_id})
     return Response(status_code=status.HTTP_204_NO_CONTENT)

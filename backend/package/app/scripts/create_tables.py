@@ -1,14 +1,18 @@
 import asyncio
 
-from app.database import engine
-from app.models import Base
+from app.database import client, initialize_database
+
 
 async def create_tables() -> None:
-    async with engine.begin() as conn:
-        #create_all() is a special method provided by SQLAlchemy's MetaData object that
-        #creates all tables defined in the metadata
-        await conn.run_sync(Base.metadata.create_all)
+    await initialize_database()
 
-#anytime we run our main script, we run this
+
+async def run() -> None:
+    try:
+        await create_tables()
+    finally:
+        await client.close()
+
+
 if __name__ == "__main__":
-    asyncio.run(create_tables())
+    asyncio.run(run())

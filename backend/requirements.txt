@@ -2,7 +2,6 @@ agent-detector==2.0.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
-asyncpg==0.31.0
 awscrt==0.36.0
 bcrypt==5.0.0
 boto3==1.43.108
@@ -53,7 +52,7 @@ s3transfer==0.19.2
 sentry-sdk==2.71.0
 shellingham==1.5.4
 six==1.17.0
-SQLAlchemy==2.1.1
+pymongo==4.13.2
 starlette==1.7.0
 typer==0.27.2
 typing-inspection==0.4.4

@@ -1,6 +1,5 @@
 fastapi
-sqlalchemy[asyncio]
-asyncpg
+pymongo==4.13.2
 pydantic==2.13.4
 pydantic-core==2.46.4
 pydantic-settings
